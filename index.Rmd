@@ -1,0 +1,256 @@
+---
+title: 'Project 2: Data Mining, Classification, Prediction'
+author: "SDS322E"
+date: ''
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, fig.align = "center", warning = F, message = F,
+tidy=TRUE, tidy.opts=list(width.cutoff=60), R.options=list(max.print=100))
+
+class_diag <- function(score, truth, positive, cutoff=.5){
+
+  pred <- factor(score>cutoff,levels=c("TRUE","FALSE"))
+  truth <- factor(truth==positive, levels=c("TRUE","FALSE"))
+
+  tab<-table(truth, pred)
+  acc=sum(diag(tab))/sum(tab)
+  sens=tab[1,1]/rowSums(tab)[1]
+  spec=tab[2,2]/rowSums(tab)[2]
+  ppv=tab[1,1]/colSums(tab)[1]
+
+#CALCULATE F1
+  f1=2*(sens*ppv)/(sens+ppv)
+  
+#CALCULATE EXACT AUC
+  truth<-as.numeric(truth=="TRUE")
+  ord<-order(score, decreasing=TRUE)
+  score <- score[ord]; truth <- truth[ord]
+  TPR=cumsum(truth)/max(1,sum(truth))
+  FPR=cumsum(!truth)/max(1,sum(!truth))
+  dup<-c(score[-1]>=score[-length(score)], FALSE)
+  TPR<-c(0,TPR[!dup],1); FPR<-c(0,FPR[!dup],1)
+  n <- length(TPR)
+  auc<- sum( ((TPR[-1]+TPR[-n])/2) * (FPR[-1]-FPR[-n]) )
+  round(data.frame(acc,sens,spec,ppv,f1,ba=(sens+spec)/2,auc, row.names = "Metrics"),4)
+}
+```
+
+# Mining, Classification, Prediction
+
+## Tatum Tran, tnt2362
+
+### Introduction 
+
+*The dataset that I included contains information about the different characters from Super Smash Bros.There are 80 characters from the Super Smash Bros Universe and I found this dataset on Kaggle. There are 480 individual observations and 6 variables. Of those variables, 1 is binary and contains the values of either 1 or 0. There are 4 other numerical variables: agility, attack, defense, weight, and whether the character is in the most recent addition of Super Smash Bros.
+
+```{R}
+library(tidyverse)
+supersmash <- read_csv("/stor/home/tnt2362/supermario.csv")
+super <- rename(supersmash, agility = hp, weight = speed, recent = is_legendary)
+```
+
+**
+### Cluster Analysis
+
+```{R}
+library(cluster)
+smash <- super %>% select(attack, defense, agility, weight)
+#PAM: Largest Average Silhouette Width
+sil_width<-vector()
+for(i in 2:10){  
+  pam_fit <- pam(smash, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+ggplot()+geom_line(aes(x=1:10,y=sil_width))+scale_x_continuous(name="k",breaks=1:10)
+
+#PAM: Run PAM
+set.seed(322) 
+pam2 <-smash %>% scale %>% pam(2)
+pam2
+
+#Visualize with ggpair()
+library(GGally)
+ggpairs(smash, columns=1:4, aes(color=as.factor(pam2$clustering)))
+
+#Interpreting Fit
+pam2$silinfo$avg.width
+plot(pam2,which=2)
+pam2$silinfo$clus.avg.widths
+
+```
+
+*After finding the average silhouette widths, it appeared that having two clusters was the optimal choice because it had the largest average silhouette width. After conducting PAM clustering with 2 clusters, we found the average silhouette width, which is about 0.29. The cluster solution is overall acceptable, but weak. The cluster structure might just be noise.*
+    
+    
+### Dimensionality Reduction with PCA
+
+```{R}
+#Standardize each variable
+dat <- smash %>% select_if(is.numeric) %>% scale
+rownames(dat)<-smash$name
+
+#PCA
+pca1 <- princomp(dat, center = T, scale=T)
+summary(pca1, loadings=T)
+
+#Choose PCs to Keep
+eigval <- pca1$sdev^2
+varprop=round(eigval/sum(eigval), 2)
+eigval
+varprop
+
+#Visualize with ggplot
+smashdf<-data.frame(PC1=pca1$scores[, 1],PC2=pca1$scores[, 2])
+ggplot(smashdf, aes(PC1, PC2)) + geom_point()
+```
+
+*All of the loadings have similar sign and magnitude in PC1, and the higher the score on PC1, the higher values for agility, attack, defense, and weight. It could indicate that the higher the PC1 score, the higher the overall strength. The proportion of variance explained by PC 1-4 is 0.499, 0.242, 0.186, and 0.072, respectively. According to Kaiser's rule, due to the eigen value of PC1 being the only value above 1.0, that was the only PC that I retained. It looks like PC1 is a general strength overall.*
+
+###  Linear Classifier
+
+```{R}
+library(tidyverse)
+library(caret)
+#drop NAs
+drop_super <- super %>% na.omit
+
+#logistic regression
+logistic_fit <- glm(recent=="1" ~ attack + agility + weight + defense, data=drop_super, family="binomial")
+
+#predicts
+probs_reg <- predict(logistic_fit, type="response")
+class_diag(probs_reg, drop_super$recent, positive="1")
+
+#confusion matrix
+table(truth = drop_super$recent, predictions= probs_reg > 0.5)
+```
+
+```{R}
+library(caret)
+# training/cross-validation of linear classifier 
+set.seed(322)
+k=10
+
+data <- sample_frac(drop_super)
+folds <- rep(1:k, length.out = nrow(data))
+diags <- NULL
+
+i=1
+for (i in 1:k){
+  train <- data[folds != i, ]
+  test <- data[folds == i, ]
+  truth <- test$recent
+  fit <- glm(recent=="1" ~ attack +agility + weight + defense, data=train, family="binomial")
+  probs<- predict(fit, newdata=test, type = "response")
+  diags <- rbind(diags, class_diag(probs, truth, positive = "1"))
+}
+
+#average performance metrics
+summarize_all(diags,mean)
+```
+
+*Using logistic regression, the model's AUC had a really great performance at 0.9497. However, after performing a k-fold CV on this same model, the model did not perform well at predicting new observations per CV AUC because the AUC dropped to a low 0.53809. This indicates signs of overfitting. 
+
+### Non-Parametric Classifier
+
+```{R}
+# non-parametric classifier code here
+library(caret)
+
+#fit using knn or classification tree
+knn_fit <- knn3(recent == "1" ~ attack + agility + weight+ defense, data = drop_super)
+
+knn_prob <- predict(knn_fit, newdata = drop_super)[, 2]
+class_diag(knn_prob, drop_super$recent, positive = "1")
+
+#confusion matrix
+table(truth = drop_super$recent, predictions= knn_prob > 0.5)
+```
+
+```{R}
+# cross-validation of np classifier here
+set.seed(1234)
+k=5 #choose number of folds
+data<-drop_super[sample(nrow(drop_super)),] #randomly order rows
+folds<-cut(seq(1:nrow(drop_super)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+## Create training and test sets
+train<-data[folds!=i,]
+test<-data[folds==i,]
+truth<-test$recent ## Truth labels for fold i
+## Train model on training set (all but fold i)
+fit<-glm(recent ~ attack + agility + weight + defense,data=train,family="binomial")
+## Test model on test set (fold i)
+probs<-predict(fit,newdata = test,type="response")
+## Get diagnostics for fold i
+diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+summarize_all(diags, mean)
+```
+
+*The nonparametric model is doing extremely well in predicting new observations an AUC value of 0.9783. However, after performing the k-fold CV on the same model, the AUC decreased to a value of 0.76428, which indicates signs of overfitting. The nonparametric model performs better in its cross-validation in comparison to the linear model.
+
+
+### Regression/Numeric Prediction
+
+```{R}
+#Classification
+fit<-lm(weight~attack +agility, data=smash)
+yhat <- predict(fit)
+mean((smash$weight-yhat)^2)
+```
+
+```{R}
+#CV
+set.seed(1234)
+k=5 #choose number of folds
+data<-smash[sample(nrow(smash)),] #randomly order rows
+folds<-cut(seq(1:nrow(smash)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+  test<-data[folds==i,]
+  ## Fit linear regression model to training set
+  fit<-lm(attack~.,data=train)
+  ## Get predictions/y-hats on test set (fold i)
+  yhat<-predict(fit,newdata=test)
+  ## Compute prediction error  (MSE) for fold i
+  diags<-mean((test$weight-yhat)^2) 
+}
+mean(diags)
+```
+
+The MSE is lower in the CV, but still an extremely high value,which indicates overfitting. The MSE is crazy high as a result of the linear regression model as well. I'm assuming it's because the range of values for weight is so diverse, and it's not necessarily easily predicted by the other variables.
+
+### Python 
+
+```{R}
+library(reticulate)
+use_python("/usr/bin/python3", required = F)
+s <- "super smash"
+```
+
+```{python}
+b = "bros"
+print(r.s, b)
+```
+
+In the chunk designated for R code, I defined the variable 's' using R code syntax and defined it as "super smash". Then, I used python syntax and defined 'b' as a string called "bros" in the chunk for python code. In that same chunk, I used the print command to print both variables, and I added "r." in front of the 's' variable because it is being called from R.
+
+### Concluding Remarks
+
+Include concluding remarks here, if any
+
+
+
+
